@@ -1,0 +1,405 @@
+//MEMORY MAPPED IO INTEGERATED WITH UART MODULE AT IO DEVICE 1
+module mmio_to_UART #(parameter BAUD_RATE=57600)(
+	input clk,
+	input [31:0] address,  // from risc v ALU output
+	input [31:0] WD,		//input data from risc v which goes to UART
+	input [7:0] uart_reciever,	// recieves data from UART rx output when reading
+	input mem_write,		//control signal for enabling write	
+	input  [7:0] uart_transmitter, //is used to transfer data to input of UART tx	
+	input tx_rx_start,	//enable for uart transmission and recieving
+	output  [31:0] RD,	// read data
+	output [7:0]uart_output_rx,	//output data from UART rx
+	output tx_done,	//pulled high when data transmitting is completed
+	output rx_done	//pulled high when data recieving is completed
+
+);
+	wire tx;	
+	
+	//reg clk;		//simulation clk generator(should be removed when instantiating)
+	//initial begin
+	//clk<=0;
+	//end
+	//always begin
+	//#1 clk=~clk;
+	//end
+
+
+	memory_mapped_IO mmio (			// memory mapped IO called
+		.clk(clk),
+		.address(address),
+		.WD(WD),
+		.uart_reciever(uart_output_rx),
+		.mem_write(mem_write),	
+		.RD(RD),
+		.uart_transmitter(uart_transmitter)
+
+	);
+
+	uart_final #(.BAUD_RATE(BAUD_RATE)) uart (	//UART module called (tx and rx) (NOTE THAT tx and rx are connected)
+		.clk(clk),
+		.data_in(uart_transmitter),
+		.tx_rx_start(tx_rx_start),
+		.data_out(uart_output_rx),
+		.tx_done(tx_done),
+		.rx_done(rx_done)
+
+	);
+
+endmodule
+
+//MEMORY MAPPED IO (DATA_MEMORY)
+module memory_mapped_IO(	//FOR 1 IO DEVICE
+	input clk,
+	input [31:0] address,  // from risc v ALU output
+	input [31:0] WD,	//input data from risc v which goes to UART
+	input [7:0] uart_reciever,	// 8 bit data from UART rx output
+	input mem_write,	//control signal for enabling write
+	output reg [31:0] RD,	// read data
+	output reg [7:0] uart_transmitter // 8 bit data input to IO Device UART tx 
+);
+	reg [7:0] memory [63:0];	//1x64 memory
+	reg WE1; // write enable for I0 devices
+	reg WEM; // write enable for rest of data memory
+	reg [1:0] RDsel; // control signal for Read data mux
+	
+	
+	initial begin	//intializing memory map adresses for IO devices		
+		memory[63] <= 8'bxxxxxxxx ; // IO DEVICE 4 
+		memory[62] <= 8'bxxxxxxxx ; // IO DEVICE 3
+		memory[61] <= 8'bxxxxxxxx; // IO DEVICE 2
+		memory[60] <= 8'bxxxxxxxx; // IO DEVICE 1 (UART)
+	end
+	
+	//IO DEVICES
+	always@(posedge clk) begin 
+		if(WE1 == 1 ) begin
+			{memory[63],memory[62],memory[61],memory[60]}<= WD; //writes the 32 bit data to the 4 memory map addresses for IO devices
+			uart_transmitter<= memory[60]; // sending data to IO device 1(UART) tx
+		end
+		else if ( RDsel == 2'b01) begin
+			memory[60]<=uart_reciever;		//recieving data from  IO device 1(UART) rx
+			RD<= {memory[63],memory[62],memory[61],memory[60]}; // loading the data of IO map locations to processor
+		end
+	end
+	
+	// REST OF DATA MEMORY
+	always@(posedge clk) begin  
+		if (WEM == 1) begin
+			{memory[address+3],memory[address+2],memory[address+1],memory[address]} <= WD;	//32 bit store data from risc v register file to four,8 bit memory locations 			
+	
+		end
+		else if (RDsel == 2'b00) begin 
+			RD <= {memory[address+3],memory[address+2],memory[address+1],memory[address]} ; // loading 32 bit data to RD from 4 differnent 1 byte mem locations
+		end
+		
+	
+	end
+
+	//ADDRESS DECODER
+	always@ (posedge clk) begin	
+		
+		if(address == 32'd64 ||address == 32'd63 ||address == 32'd62 ||address ==32'd61 ) begin // if any of the address is detected the 												// if statement will be executed
+			if(mem_write == 1) begin		//check for write enable
+				WEM<=0;
+				RDsel<='x;
+				WE1<=1; end
+			else if ( mem_write == 0) begin
+				RDsel<= 1;				
+				WEM<=0;
+				WE1<=0; end
+			
+		end
+		
+		else begin
+			
+			if(mem_write==1) begin
+				WEM<=1;
+				WE1<=0; 
+				RDsel<='x;  end
+			else if(mem_write ==0) begin
+				RDsel<=0;
+				WEM<=0;
+				WE1<=0;
+			end
+		end
+			
+
+
+	end
+endmodule
+
+//UART MODULE(CONTAINS INSTANTIATION OF TX,RX,BAUD GEN)
+module uart_final #(parameter BAUD_RATE=57600)(		//can can control the baud rate by assigning the desired value 
+	input  clk,					//to parameter BAUD_RATE here we have taken 24000 as an example
+	input [7:0] data_in,				//value
+	input  wire tx_rx_start,
+	output [7:0]data_out,
+	output tx_done,
+	output rx_done
+
+	);
+	
+	wire clk_baud;
+	wire tx;
+	wire rx;
+	
+	baudgen #(.BAUD_RATE(BAUD_RATE)) gen (		//calling baud generator module
+		.clk(clk),
+		.tx_rx_start(tx_rx_start),
+		.clk_baud(clk_baud)
+	);
+
+
+	uart_tx transmitter (				//calling transmitter module
+		.data_in(data_in),
+		.tx_rx_start(tx_rx_start),	
+		.clk_baud(clk_baud),
+		.tx_done(tx_done),
+		.tx(tx)
+	);
+
+	uart_rx reciever (				// calling reciever module
+		.rx(tx),
+		.tx_rx_start(tx_rx_start),
+		.clk_baud(clk_baud),
+		.rx_done(rx_done),
+		.data_out(data_out)
+	
+	);
+	
+
+endmodule
+
+//UART TRANSMITTING MODULE
+module uart_tx(										
+	input [7:0] data_in, //input data 8 bit	
+	input wire tx_rx_start, //enable
+	input clk_baud, //from baud gen
+	output reg tx_done,  //indiactor
+	output reg tx   //output serial data	
+	
+);
+
+	parameter IDLE=2'b00;  //0 =idle
+	parameter START=2'b01; //1=start
+	parameter TRANS=2'b10; //2=transmission
+	parameter STOP=2'b11; // 3= stop
+	reg [1:0] current_state_tx= IDLE;
+	reg [10:0] buffer;   //data pack
+	reg [3:0] count;
+	reg parity_bit;
+		
+	always@(posedge clk_baud) begin: FSM			//finite state machine
+	
+	case(current_state_tx)
+		IDLE: 
+		begin
+			
+			if(tx_rx_start == 1'b1  )
+			begin	
+				current_state_tx <= START;		//proceeds to start state as the enable pin is pulled high
+				tx <= 1 ;				//else stays idle
+				tx_done <= 0;
+				buffer <= 0;	//initializing buffer
+				parity_bit <= ^data_in;  // parity bit generation
+		 
+			end
+			else 
+			begin
+				tx_done <= 0;		
+				current_state_tx <= IDLE;
+		 
+			end
+		end
+
+		START:
+		begin
+			tx <= 0 ;
+			if(tx_rx_start)						// input data loads in data packet as enable is pulled high
+			begin							// then proceeds to tansmission state
+				buffer <= {1'b1,parity_bit,data_in,1'b0}; // loading of data in data packet 
+				count <= 0;
+				tx_done <= 0;
+				current_state_tx <= TRANS;
+			end
+			else
+			begin
+				current_state_tx <= START;
+				tx_done <= 0;		
+				count <= 0;
+			end
+
+		end
+
+		TRANS:
+		begin
+			if(count==9)				//the count increases as the input data gets loaded bit by bit into the
+			begin					// the buffer/data packet then proceeds to stop state
+				tx  <= buffer[0];
+            			buffer   <= buffer>>1;
+            			count    <= count+1;
+           			current_state_tx <= STOP;
+         		end
+			else 
+			begin
+            			tx      <= buffer[0];
+           			buffer <=  buffer>>1;
+            			count     <= count+1;
+          		end
+		end
+
+		STOP:						//tx_done/indiactor is pulled high and the state is set to IDLE
+		begin						// where all the values are intialized and 1 is trasnmitted until
+			tx   <= 1;				// enable is pulled high
+			tx_done <=1;
+			current_state_tx <= IDLE;
+		end
+
+		default: current_state_tx <= IDLE;
+		
+	endcase
+	
+	end
+
+endmodule
+
+//UART RECIEVING MODULE
+module uart_rx(						
+	input reg rx, //recieving data serial	
+	input wire tx_rx_start,   //enable
+	input clk_baud, //from baud gen
+	output reg rx_done, //data sent indicator
+	output reg [7:0] data_out   //output data 8bit
+
+);
+
+	parameter IDLE=3'b000;  //0=idle
+	parameter START=3'b001; //1=start
+	parameter RECIEVE=3'b010; //2=transmission
+	parameter CHECK_SUM=3'b011;	 //3=check sum/parity check
+	parameter STOP=3'b100; // 4= stop
+	reg parity_bit;
+	reg [2:0] current_state_rx= 3'b000;
+	reg [8:0] buffer;  // 8 data 1 parity(data pack)
+	reg [3:0] count;
+	
+	
+	always@(posedge clk_baud) begin: FSM		//finite state machine
+	
+	case(current_state_rx)
+		IDLE: 
+		begin
+		
+			if(tx_rx_start == 1 )                //when enable pin is 1 will move to start state if not will stay idle
+			begin			
+				rx_done <= 0;
+				buffer <= 0;
+				count <= 0;
+				current_state_rx <= START;	
+		 
+			end
+			else 
+			begin				
+				rx_done <= 0;
+				current_state_rx <= IDLE;
+		 
+			end
+		end
+
+		START:
+		begin		 
+			if(rx==1'b0)				// when  rx=0 is recieved current state will switch to recieve state if not then it will remain in start state
+			begin
+				current_state_rx <= RECIEVE;
+				buffer <= 0;
+				count <= 0;
+				rx_done <= 0;
+				
+			end
+			else
+			begin
+				current_state_rx <= START; 
+				buffer <= 0;          
+				rx_done <= 0;		
+				count <= 0;
+			end
+
+		end
+
+		RECIEVE:
+		begin
+			if( count == 8 )
+			begin
+				buffer <= {rx,buffer[8:1]};
+           			current_state_rx <= CHECK_SUM;
+         		end
+			else 
+			begin
+            			buffer <= {rx,buffer[8:1]};				//the count will increase as the revcieving data gets concatinated with the
+            			count  <= count+1;					//1st to 8th bit of the register leaving the 9th bit for the parity check
+          		end
+		end
+
+		CHECK_SUM:
+		begin
+			parity_bit = ^buffer[8:1];					//if the parity matches the first 1st to 8th bit is sent to output
+			if( rx == parity_bit )
+			begin
+				data_out <= buffer [8:1];
+				current_state_rx <= STOP;
+			end
+			else
+			begin								//if not then an undefied value is def into the register with the 9th bit being the
+   				data_out <= 'x;						//changed parity bit	
+         			buffer[8] <= rx;
+          			current_state_rx <= STOP;					//bot scenarios proceed to stop state
+			end
+				
+		end
+
+		STOP:							//stop state is just for the indication of data receive confirmation
+		begin
+			rx_done <=1;							
+			current_state_rx <= START ;	
+										//as it pulls the rx_done high and then proceeds to IDLE state where all the values 
+		end									//are intialized once again and as we know that until the new data is transmitted the 
+									// the transmitter gives 1 as output due to which the code deosn't proceed to recieving state
+		default: current_state_rx <= IDLE;
+		
+	endcase	
+	
+	end
+
+endmodule
+
+
+//BAUD GENERATOR
+module baudgen #(parameter BAUD_RATE=2400)( 		//baud rate generator
+	input  clk ,
+	input wire tx_rx_start,
+	output reg clk_baud
+);
+		
+	parameter FREQ = 1000000; //1Mhz;
+	parameter baud = FREQ/BAUD_RATE;
+	reg [31:0] count = 0;
+
+	always @(posedge clk ) 				//for every rising edge of input clock the value of count increases and
+	begin						//as it reaches the value of baud the clk_baud becomes high ,then it resets
+		if(tx_rx_start == 1'b0) begin		// as the value of count becomes greater
+			count <= 0;
+		end
+		else if(count>=baud) begin 			
+			count <= 0;
+		end
+		else begin
+			count <= count + 1  ;
+		end
+		
+	end
+	
+	always@(posedge clk) begin 		
+		clk_baud = count == baud;
+	end
+	
+endmodule
